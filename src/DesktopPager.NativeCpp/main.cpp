@@ -499,9 +499,11 @@ void RestartExplorer(AppState& state)
     {
         // usa il percorso assoluto per evitare rischi di search-order hijacking
         wchar_t winDir[MAX_PATH]{};
-        GetWindowsDirectoryW(winDir, MAX_PATH);
-        std::wstring explorerPath = std::wstring(winDir) + L"\\explorer.exe";
-        ShellExecuteW(nullptr, L"open", explorerPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (GetWindowsDirectoryW(winDir, MAX_PATH) > 0)
+        {
+            std::wstring explorerPath = std::wstring(winDir) + L"\\explorer.exe";
+            ShellExecuteW(nullptr, L"open", explorerPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
     }
 
     state.currentPage = 1;
