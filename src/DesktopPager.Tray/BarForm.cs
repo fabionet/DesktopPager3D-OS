@@ -599,10 +599,10 @@ public sealed class BarForm : Form
             };
             try
             {
-                // estrai l'icona del bersaglio, non del .lnk, cosi' non
-                // compare la freccetta di overlay dei collegamenti
-                var iconSource = ResolveShortcutTarget(file) ?? file;
-                using var icon = Icon.ExtractAssociatedIcon(iconSource);
+                var isShortcut = Path.GetExtension(file).Equals(".lnk", StringComparison.OrdinalIgnoreCase);
+                using var icon = isShortcut
+                    ? (Icon)SystemIcons.Application.Clone()
+                    : Icon.ExtractAssociatedIcon(file);
                 if (icon is not null)
                 {
                     pb.Image = IconToTransparentBitmap(icon, 28);
@@ -751,32 +751,6 @@ public sealed class BarForm : Form
         catch
         {
             // aggiunta fallita: ignora
-        }
-    }
-
-    private static string? ResolveShortcutTarget(string lnkPath)
-    {
-        if (!Path.GetExtension(lnkPath).Equals(".lnk", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-
-        try
-        {
-            var shellType = Type.GetTypeFromProgID("WScript.Shell");
-            if (shellType is null)
-            {
-                return null;
-            }
-
-            dynamic shell = Activator.CreateInstance(shellType)!;
-            var lnk = shell.CreateShortcut(lnkPath);
-            string target = lnk.TargetPath;
-            return string.IsNullOrWhiteSpace(target) || !File.Exists(target) ? null : target;
-        }
-        catch
-        {
-            return null;
         }
     }
 
