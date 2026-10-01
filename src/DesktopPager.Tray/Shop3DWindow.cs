@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -57,6 +58,7 @@ public sealed class Shop3DWindow : Window
     private const int TickMs = 33;
     private const double MoveSpeed = 0.13 * TickMs / 16.0;
     private const double TurnSpeed = 0.035 * TickMs / 16.0; // radianti/tick
+    private const double SprintFactor = 2.4; // tasto E tenuto premuto: passo più veloce nei corridoi lunghi
 
     // rimpicciolimento dei banchi all'avvicinarsi (così restano leggibili per intero)
     private const double ShrinkNear = 3.0;   // sotto questa distanza scala minima
@@ -71,6 +73,9 @@ public sealed class Shop3DWindow : Window
 
     private readonly TextBlock _pathLabel;
     private readonly TextBlock _focusLabel;
+    private readonly System.Windows.Shapes.Ellipse _crosshair = new();
+    private readonly System.Windows.Controls.Border _mapOverlay = new(); // mappa 3D del percorso (tasto Q)
+    private bool _mapVisible;
 
     private readonly List<Entry> _entries = new();
     private readonly List<Point3D> _boothPos = new();
@@ -102,6 +107,32 @@ public sealed class Shop3DWindow : Window
     private bool _settled;
     private double _roomHalfW, _roomBackZ;
 
+    // --- mouse-look (FPS) --------------------------------------------------
+    // Il mouse gira la vista a 360° (yaw) e la inclina su/giù (pitch): così si
+    // possono inquadrare le porte sulle pareti e la porta di uscita in fondo,
+    // cosa impossibile con la sola rotazione lenta delle frecce e il pitch
+    // fisso di prima. Il cursore viene nascosto e ri-centrato a ogni movimento
+    // (stile videogioco): la finestra è a schermo intero, quindi non esce mai.
+    private const double MouseSensitivity = 0.0022; // radianti per pixel
+    private const double PitchLimit = 1.30;          // ~74°: evita il gimbal a ±90°
+    private double _pitch;                             // + = verso l'alto
+    private double _lastPitch;
+    private bool _mouseLook;                           // attivo solo dopo l'intro
+
+    // --- head-bob (emulazione del passo, stile FPS) -----------------------
+    // La telecamera ondeggia su/giù e di lato mentre si cammina, come la testa
+    // di chi cammina; la cadenza segue la distanza percorsa (più rapida in
+    // corsa) e si smorza dolcemente da fermo.
+    private const double BobAmpY = 0.055;         // ampiezza verticale (m)
+    private const double BobAmpX = 0.040;         // oscillazione laterale (m)
+    private const double BobCyclesPerMeter = 3.9; // ~1,6 m per ciclo completo
+    private double _bobPhase;                       // fase del passo (radianti)
+    private double _bobLevel;                       // 0..1: sale camminando, scende da fermo
+    private double _lastBobY, _lastBobX;            // ultimo bob applicato (per il guard)
+
+    // cursore integrato: Tab passa da mouse-look a puntatore per usare l'overlay
+    private bool _cursorMode;
+
     // porta di uscita: un tesseratto sulla parete di fondo che si apre
     // avvicinandosi, oltre il quale si vede il desktop; entrandoci parte uno
     // zoom che riporta al desktop reale
@@ -121,9 +152,13 @@ public sealed class Shop3DWindow : Window
     // che si apre come una porta, con barra di avanzamento del caricamento
     private readonly Grid _rootGrid = new();
     private readonly Grid _loadingOverlay = new();
-    private readonly Canvas _logoCanvas = new();
-    private readonly WpfPolygon[] _logoPanes = new WpfPolygon[4]; // facce trapezoidali
-    private WpfPolygon? _logoCore;                                 // cubo interno
+    // Il logo di caricamento è un tesseratto TRIDIMENSIONALE (non un disegno
+    // piatto): un ipercubo a reticolo — cubo esterno, cubo interno concentrico e
+    // gli 8 spigoli di collegamento — reso in un piccolo Viewport3D che ruota di
+    // continuo mostrando la sua profondità reale.
+    private readonly Viewport3D _logoViewport = new();
+    private readonly AxisAngleRotation3D _logoSpin = new(new Vector3D(0.18, 1, 0.06), 0);
+    private readonly ScaleTransform _logoScale = new(1, 1);
     private readonly WpfRectangle _progressFill = new();
     private const double ProgressWidth = 340;
     private bool _introDone;
@@ -159,8 +194,8 @@ public sealed class Shop3DWindow : Window
         var hint = Hud(12, FontWeights.Normal, HorizontalAlignment.Center, VerticalAlignment.Bottom,
             new Thickness(0, 0, 0, 22));
         hint.Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 165));
-        hint.Text = "frecce / WASD = muoviti e gira   •   Invio = entra o apri   •   Backspace = indietro   •   "
-                    + "porta in fondo o Esc = torna al desktop";
+        hint.Text = "mouse = guardati intorno (360°)   •   WASD / frecce = cammina   •   E = corri   •   Q = mappa   •   "
+                    + "Tab = cursore per la mappa   •   Invio o clic = apri   •   Backspace = indietro   •   Esc = esci";
 
         // istantanea del desktop PRIMA che questa finestra lo copra: è ciò che
         // si vedrà oltre la porta di uscita e nello zoom finale
@@ -183,6 +218,38 @@ public sealed class Shop3DWindow : Window
         _rootGrid.Children.Add(_pathLabel);
         _rootGrid.Children.Add(_focusLabel);
         _rootGrid.Children.Add(hint);
+
+        // mirino: col cursore nascosto dal mouse-look serve un riferimento per
+        // sapere dove punta il clic (che seleziona ciò che sta al centro)
+        _crosshair.Width = 7;
+        _crosshair.Height = 7;
+        _crosshair.HorizontalAlignment = HorizontalAlignment.Center;
+        _crosshair.VerticalAlignment = VerticalAlignment.Center;
+        _crosshair.Fill = new SolidColorBrush(Color.FromArgb(200, 245, 248, 255));
+        _crosshair.Stroke = new SolidColorBrush(Color.FromArgb(140, 0, 0, 0));
+        _crosshair.StrokeThickness = 1;
+        _crosshair.IsHitTestVisible = false;
+        _crosshair.Visibility = Visibility.Collapsed; // compare a fine intro
+        _rootGrid.Children.Add(_crosshair);
+
+        // mappa 3D del percorso (tasto Q): un pannello inclinato in prospettiva
+        // (PlaneProjection) con la scia di cartelle dalla radice fino a dove sei.
+        _mapOverlay.HorizontalAlignment = HorizontalAlignment.Right;
+        _mapOverlay.VerticalAlignment = VerticalAlignment.Center;
+        _mapOverlay.Margin = new Thickness(0, 0, 70, 0);
+        _mapOverlay.Padding = new Thickness(18);
+        _mapOverlay.CornerRadius = new CornerRadius(14);
+        _mapOverlay.Background = new SolidColorBrush(Color.FromArgb(214, 14, 18, 28));
+        _mapOverlay.BorderBrush = new SolidColorBrush(Color.FromArgb(150, 120, 160, 220));
+        _mapOverlay.BorderThickness = new Thickness(1);
+        _mapOverlay.IsHitTestVisible = false;
+        _mapOverlay.Visibility = Visibility.Collapsed;
+        // taglio obliquo (proiezione "cavaliera"): insieme all'indentazione dei
+        // nodi dà alla scia l'aspetto di una mappa 3D che entra nella scena
+        _mapOverlay.RenderTransformOrigin = new Point(1, 0.5);
+        _mapOverlay.RenderTransform = new SkewTransform(0, -10);
+        _rootGrid.Children.Add(_mapOverlay);
+
         BuildIntroOverlays();
         _rootGrid.Children.Add(_loadingOverlay);
         _rootGrid.Children.Add(_exitZoom);
@@ -196,7 +263,7 @@ public sealed class Shop3DWindow : Window
         PreviewKeyDown += OnKeyDown;
         KeyUp += (_, e) => _keys.Remove(e.Key);
         MouseLeftButtonUp += OnClick;
-        Closed += (_, _) => _loop.Stop();
+        Closed += (_, _) => { _loop.Stop(); DisableMouseLook(); };
     }
 
     private static TextBlock Hud(double size, FontWeight weight, HorizontalAlignment h, VerticalAlignment v, Thickness margin)
@@ -219,10 +286,11 @@ public sealed class Shop3DWindow : Window
 
     // --- ingresso cinematografico -----------------------------------------
 
-    private const double LogoSize = 178;   // lato del quadrato esterno del tesseratto
-    private const double LogoInset = 50;   // rientro del cubo interno
+    private const double LogoView = 240;   // lato del riquadro 3D del logo (px)
 
     private static Color Rgb((byte R, byte G, byte B) c) => Color.FromRgb(c.R, c.G, c.B);
+    private static Material Emis((byte R, byte G, byte B) c) =>
+        new EmissiveMaterial(new SolidColorBrush(Rgb(c)));
 
     private void BuildIntroOverlays()
     {
@@ -230,61 +298,33 @@ public sealed class Shop3DWindow : Window
         _loadingOverlay.Background = System.Windows.Media.Brushes.Black;
         _loadingOverlay.Visibility = Visibility.Collapsed;
 
-        // tesseratto (ipercubo) colorato, centrato: cubo esterno + cubo interno
-        // + spigoli di collegamento. Le 4 facce trapezoidali sono i battenti
-        // della "porta" che si apre.
-        _logoCanvas.Width = LogoSize;
-        _logoCanvas.Height = LogoSize;
-        _logoCanvas.HorizontalAlignment = HorizontalAlignment.Center;
-        _logoCanvas.VerticalAlignment = VerticalAlignment.Center;
-        _logoCanvas.Margin = new Thickness(0, 0, 0, 90);
+        // tesseratto (ipercubo) TRIDIMENSIONALE, centrato: un reticolo di cubo
+        // esterno + cubo interno + 8 spigoli di collegamento, in un Viewport3D
+        // che ruota su sé stesso rivelando la sua profondità reale.
+        _logoViewport.Width = LogoView;
+        _logoViewport.Height = LogoView;
+        _logoViewport.HorizontalAlignment = HorizontalAlignment.Center;
+        _logoViewport.VerticalAlignment = VerticalAlignment.Center;
+        _logoViewport.Margin = new Thickness(0, 0, 0, 90);
+        _logoViewport.IsHitTestVisible = false;
+        _logoViewport.RenderTransformOrigin = new Point(0.5, 0.5);
+        _logoViewport.RenderTransform = _logoScale; // zoom "dentro" il logo a fine intro
+        RenderOptions.SetEdgeMode(_logoViewport, EdgeMode.Aliased);
 
-        const double s = LogoSize;
-        const double m = LogoInset;
-        var oTL = new Point(0, 0);
-        var oTR = new Point(s, 0);
-        var oBR = new Point(s, s);
-        var oBL = new Point(0, s);
-        var iTL = new Point(m, m);
-        var iTR = new Point(s - m, m);
-        var iBR = new Point(s - m, s - m);
-        var iBL = new Point(m, s - m);
-
-        // su fondo nero gli spigoli chiari fanno risaltare il reticolo
-        var edge = new SolidColorBrush(Color.FromRgb(0xF2, 0xF5, 0xFF));
-
-        (Point[] pts, Color col)[] faces =
+        // vista di tre quarti, da uno spigolo in alto: il cubo interno si vede
+        // SEMPRE angolato — larghezza, altezza e profondità insieme — mai di
+        // faccia. La rotazione poi ne accentua la tridimensionalità.
+        _logoViewport.Camera = new PerspectiveCamera
         {
-            (new[] { oTL, oTR, iTR, iTL }, Rgb(TesseractPalette.Top)),
-            (new[] { oTR, oBR, iBR, iTR }, Rgb(TesseractPalette.Right)),
-            (new[] { oBR, oBL, iBL, iBR }, Rgb(TesseractPalette.Bottom)),
-            (new[] { oBL, oTL, iTL, iBL }, Rgb(TesseractPalette.Left))
+            Position = new Point3D(1.9, 1.5, 2.3),
+            LookDirection = new Vector3D(-1.9, -1.5, -2.3), // punta all'origine
+            UpDirection = new Vector3D(0, 1, 0),
+            FieldOfView = 40
         };
-        for (var i = 0; i < 4; i++)
-        {
-            var pane = new WpfPolygon
-            {
-                Points = new PointCollection(faces[i].pts),
-                Fill = new SolidColorBrush(faces[i].col),
-                Stroke = edge,
-                StrokeThickness = 2.5,
-                RenderTransform = new TranslateTransform()
-            };
-            _logoPanes[i] = pane;
-            _logoCanvas.Children.Add(pane);
-        }
 
-        // cubo interno: resta fermo mentre i battenti si aprono, poi vola
-        // verso lo spettatore (si attraversa l'ipercubo)
-        _logoCore = new WpfPolygon
-        {
-            Points = new PointCollection(new[] { iTL, iTR, iBR, iBL }),
-            Fill = new SolidColorBrush(Rgb(TesseractPalette.Core)),
-            Stroke = edge,
-            StrokeThickness = 2.5,
-            RenderTransform = new ScaleTransform(1, 1, s / 2, s / 2)
-        };
-        _logoCanvas.Children.Add(_logoCore);
+        var logoModel = BuildTesseractModel();
+        logoModel.Transform = new RotateTransform3D(_logoSpin);
+        _logoViewport.Children.Add(new ModelVisual3D { Content = logoModel });
 
         // barra di avanzamento sotto il logo
         var track = new System.Windows.Controls.Border
@@ -316,9 +356,85 @@ public sealed class Shop3DWindow : Window
             Margin = new Thickness(0, 205, 0, 0)
         };
 
-        _loadingOverlay.Children.Add(_logoCanvas);
+        _loadingOverlay.Children.Add(_logoViewport);
         _loadingOverlay.Children.Add(track);
         _loadingOverlay.Children.Add(loadText);
+    }
+
+    // --- tesseratto 3D del logo -------------------------------------------
+
+    /// <summary>
+    /// Ipercubo a reticolo: cubo esterno, cubo interno (più piccolo, concentrico)
+    /// e gli 8 spigoli che uniscono i vertici corrispondenti — la proiezione
+    /// classica del tesseratto. Ogni spigolo è una sottile barra 3D emissiva, così
+    /// risalta sul nero e ha volume vero anche da fermo.
+    /// </summary>
+    private Model3DGroup BuildTesseractModel()
+    {
+        var g = new Model3DGroup();
+
+        var outer = CubeCorners(0.5);
+        var inner = CubeCorners(0.28);
+        var edges = CubeEdges();
+
+        // spigoli del cubo esterno chiari: il fondo dell'intro è nero, il colore
+        // Edge della palette (quasi nero, per la moneta su fondo chiaro) sparirebbe
+        var outerMat = Emis((0xF2, 0xF5, 0xFF));
+        var innerMat = Emis(TesseractPalette.Core);
+        var linkMats = new[]
+        {
+            Emis(TesseractPalette.Top), Emis(TesseractPalette.Right),
+            Emis(TesseractPalette.Bottom), Emis(TesseractPalette.Left)
+        };
+
+        foreach (var (a, b) in edges)
+        {
+            g.Children.Add(EdgeBar(outer[a], outer[b], 0.035, outerMat));
+            g.Children.Add(EdgeBar(inner[a], inner[b], 0.030, innerMat));
+        }
+
+        for (var i = 0; i < 8; i++)
+        {
+            g.Children.Add(EdgeBar(outer[i], inner[i], 0.028, linkMats[i % 4]));
+        }
+
+        return g;
+    }
+
+    private static Point3D[] CubeCorners(double s) => new[]
+    {
+        new Point3D(-s, -s, -s), new Point3D(s, -s, -s), new Point3D(s, s, -s), new Point3D(-s, s, -s),
+        new Point3D(-s, -s, s), new Point3D(s, -s, s), new Point3D(s, s, s), new Point3D(-s, s, s)
+    };
+
+    private static (int A, int B)[] CubeEdges() => new (int, int)[]
+    {
+        (0, 1), (1, 2), (2, 3), (3, 0), // faccia z-
+        (4, 5), (5, 6), (6, 7), (7, 4), // faccia z+
+        (0, 4), (1, 5), (2, 6), (3, 7)  // montanti
+    };
+
+    /// <summary>Spigolo come sottile barra 3D orientata dal punto a al punto b.</summary>
+    private static GeometryModel3D EdgeBar(Point3D a, Point3D b, double thick, Material mat)
+    {
+        var dir = b - a;
+        var len = dir.Length;
+        var bar = Box(thick, len, thick, 0, 0, 0, mat); // barra centrata sull'origine, alta lungo Y
+
+        var d = dir;
+        d.Normalize();
+        var axis = Vector3D.CrossProduct(new Vector3D(0, 1, 0), d);
+        if (axis.Length < 1e-6)
+        {
+            axis = new Vector3D(1, 0, 0); // già parallela a Y: un asse qualsiasi va bene
+        }
+
+        var angle = Math.Acos(Math.Clamp(Vector3D.DotProduct(new Vector3D(0, 1, 0), d), -1, 1)) * 180 / Math.PI;
+        var tg = new Transform3DGroup();
+        tg.Children.Add(new RotateTransform3D(new AxisAngleRotation3D(axis, angle)));
+        tg.Children.Add(new TranslateTransform3D((a.X + b.X) / 2, (a.Y + b.Y) / 2, (a.Z + b.Z) / 2));
+        bar.Transform = tg;
+        return bar;
     }
 
     private void PlayIntro()
@@ -329,26 +445,16 @@ public sealed class Shop3DWindow : Window
         _camera.Position = new Point3D(0, 15, -1);
         _camera.LookDirection = new Vector3D(0, -1, -0.18);
 
-        // reset tesseratto e barra
-        foreach (var pane in _logoPanes)
-        {
-            pane.Opacity = 1;
-            var t = (TranslateTransform)pane.RenderTransform;
-            t.BeginAnimation(TranslateTransform.XProperty, null);
-            t.BeginAnimation(TranslateTransform.YProperty, null);
-            t.X = 0;
-            t.Y = 0;
-        }
-        if (_logoCore is not null)
-        {
-            _logoCore.Opacity = 1;
-            _logoCore.BeginAnimation(OpacityProperty, null);
-            var cs = (ScaleTransform)_logoCore.RenderTransform;
-            cs.BeginAnimation(ScaleTransform.ScaleXProperty, null);
-            cs.BeginAnimation(ScaleTransform.ScaleYProperty, null);
-            cs.ScaleX = 1;
-            cs.ScaleY = 1;
-        }
+        // reset del logo 3D: azzera zoom/opacità e (ri)avvia la rotazione continua
+        _logoViewport.Opacity = 1;
+        _logoViewport.BeginAnimation(OpacityProperty, null);
+        _logoScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        _logoScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        _logoScale.ScaleX = 1;
+        _logoScale.ScaleY = 1;
+        _logoSpin.BeginAnimation(AxisAngleRotation3D.AngleProperty,
+            new DoubleAnimation(0, 360, TimeSpan.FromSeconds(7)) { RepeatBehavior = RepeatBehavior.Forever });
+
         _progressFill.Width = 0;
         _loadingOverlay.Opacity = 1;
         _loadingOverlay.Visibility = Visibility.Visible;
@@ -377,30 +483,14 @@ public sealed class Shop3DWindow : Window
 
     private void OpenLogoDoor()
     {
-        var dur = TimeSpan.FromMilliseconds(1600);
+        // fase finale: si "vola dentro" il tesseratto — il logo 3D ingrandisce e
+        // sfuma mentre il nero svanisce e compare la stanza. La rotazione continua
+        // avviata in PlayIntro resta attiva e dà il senso di attraversarlo.
         var ease = new CubicEase { EasingMode = EasingMode.EaseIn };
-        var spread = Math.Max(ActualWidth, ActualHeight);
-
-        // ogni faccia trapezoidale esce dal proprio lato (alto/destra/basso/sinistra)
-        (double dx, double dy)[] dir =
-        {
-            (0, -spread), (spread, 0), (0, spread), (-spread, 0)
-        };
-        for (var i = 0; i < 4; i++)
-        {
-            var t = (TranslateTransform)_logoPanes[i].RenderTransform;
-            t.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(0, dir[i].dx, dur) { EasingFunction = ease });
-            t.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0, dir[i].dy, dur) { EasingFunction = ease });
-        }
-
-        // il cubo interno ingrandisce fino ad avvolgere lo spettatore e svanisce
-        if (_logoCore is not null)
-        {
-            var cs = (ScaleTransform)_logoCore.RenderTransform;
-            cs.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1, 9, dur) { EasingFunction = ease });
-            cs.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1, 9, dur) { EasingFunction = ease });
-            _logoCore.BeginAnimation(OpacityProperty, Fade(1, 0, 1300));
-        }
+        var dur = TimeSpan.FromMilliseconds(1500);
+        _logoScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1, 8, dur) { EasingFunction = ease });
+        _logoScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1, 8, dur) { EasingFunction = ease });
+        _logoViewport.BeginAnimation(OpacityProperty, Fade(1, 0, 1300));
     }
 
     private void LandCamera()
@@ -424,15 +514,19 @@ public sealed class Shop3DWindow : Window
         // libera la camera dalle animazioni e passa al controllo manuale
         _camera.BeginAnimation(PerspectiveCamera.PositionProperty, null);
         _camera.BeginAnimation(PerspectiveCamera.LookDirectionProperty, null);
+        _logoSpin.BeginAnimation(AxisAngleRotation3D.AngleProperty, null); // ferma il logo, ora nascosto
         _loadingOverlay.Visibility = Visibility.Collapsed;
         _px = 0;
         _pz = 10;
         _yaw = 0;
+        _pitch = 0;
         _introDone = true;
         if (!_loop.IsEnabled)
         {
             _loop.Start();
         }
+
+        EnableMouseLook();
     }
 
     private static DoubleAnimation Fade(double from, double to, int ms) =>
@@ -491,9 +585,227 @@ public sealed class Shop3DWindow : Window
         {
             case Key.Enter: ActivateFocus(); return;
             case Key.Back: GoUp(); return;
+            case Key.Q: ToggleMap(); return;
+            case Key.Tab: e.Handled = true; SetCursorMode(!_cursorMode); return;
             default: _keys.Add(e.Key); break;
         }
     }
+
+    // --- mappa 3D del percorso (tasto Q) ----------------------------------
+
+    private void ToggleMap()
+    {
+        _mapVisible = !_mapVisible;
+        if (_mapVisible)
+        {
+            BuildPathMap();
+        }
+
+        _mapOverlay.Visibility = _mapVisible ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// Popola la mappa con la scia di cartelle dalla radice ("Questo PC") fino
+    /// alla posizione corrente: ogni tappa è un nodo, quello attuale evidenziato,
+    /// e l'indentazione crescente più l'inclinazione danno il senso di profondità.
+    /// </summary>
+    private void BuildPathMap()
+    {
+        var stack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Vertical };
+
+        stack.Children.Add(new TextBlock
+        {
+            Text = "🧭 Mappa del percorso",
+            Foreground = Brushes.White,
+            FontFamily = new FontFamily("Segoe UI"),
+            FontSize = 18,
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 0, 12)
+        });
+
+        var segments = PathSegments(_current);
+        for (var i = 0; i < segments.Count; i++)
+        {
+            var isCurrent = i == segments.Count - 1;
+            var node = new System.Windows.Controls.Border
+            {
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12, 7, 14, 7),
+                Margin = new Thickness(i * 18, 3, 0, 3), // a scalare: la scia "entra" nella scena
+                Background = new SolidColorBrush(isCurrent
+                    ? Color.FromArgb(235, 53, 157, 224)
+                    : Color.FromArgb(150, 40, 48, 66)),
+                Child = new TextBlock
+                {
+                    Text = (isCurrent ? "📍 " : i == 0 ? "🏠 " : "📂 ") + segments[i],
+                    Foreground = Brushes.White,
+                    FontFamily = new FontFamily("Segoe UI"),
+                    FontSize = isCurrent ? 15 : 14,
+                    FontWeight = isCurrent ? FontWeights.SemiBold : FontWeights.Normal
+                }
+            };
+
+            // cliccabile in modalità cursore (Tab): salta alla cartella di questa
+            // tappa. Il percorso è la radice + i segmenti fino a qui.
+            string? target = null;
+            if (i > 0)
+            {
+                target = string.Join("\\", segments.GetRange(1, i));
+                if (target.EndsWith(":"))
+                {
+                    target += "\\"; // "C:" -> "C:\" (radice del disco)
+                }
+            }
+
+            var captured = target;
+            node.Cursor = System.Windows.Input.Cursors.Hand;
+            node.MouseLeftButtonUp += (_, _) => Navigate(captured);
+
+            stack.Children.Add(node);
+        }
+
+        stack.Children.Add(new TextBlock
+        {
+            Text = "Q = chiudi",
+            Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 165)),
+            FontFamily = new FontFamily("Segoe UI"),
+            FontSize = 11,
+            Margin = new Thickness(0, 12, 0, 0)
+        });
+
+        _mapOverlay.Child = stack;
+    }
+
+    /// <summary>Tappe del percorso: "Questo PC" + i segmenti della cartella corrente.</summary>
+    private static List<string> PathSegments(string? path)
+    {
+        var list = new List<string> { "Questo PC" };
+        if (string.IsNullOrEmpty(path))
+        {
+            return list;
+        }
+
+        list.AddRange(path.TrimEnd('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries));
+        return list;
+    }
+
+    // --- mouse-look --------------------------------------------------------
+
+    private void EnableMouseLook()
+    {
+        if (_mouseLook)
+        {
+            return;
+        }
+
+        _mouseLook = true;
+        Cursor = System.Windows.Input.Cursors.None; // nascondi il puntatore
+        _crosshair.Visibility = Visibility.Visible;
+        MouseMove += OnMouseMove;
+        WarpToCenter();
+    }
+
+    private void DisableMouseLook()
+    {
+        if (!_mouseLook)
+        {
+            return;
+        }
+
+        _mouseLook = false;
+        MouseMove -= OnMouseMove;
+        _crosshair.Visibility = Visibility.Collapsed;
+        Cursor = System.Windows.Input.Cursors.Arrow;
+    }
+
+    /// <summary>
+    /// Tab: alterna mouse-look e cursore. In modalità cursore il puntatore è
+    /// visibile, la rotazione col mouse è sospesa e la mappa (Q) diventa
+    /// cliccabile per saltare a una cartella del percorso. Il movimento con
+    /// tastiera (WASD/frecce, E per correre) resta attivo in entrambe.
+    /// </summary>
+    private void SetCursorMode(bool on)
+    {
+        if (_cursorMode == on || !_introDone || _exiting)
+        {
+            return;
+        }
+
+        _cursorMode = on;
+        if (on)
+        {
+            DisableMouseLook();               // mostra il cursore, ferma la rotazione col mouse
+            _mapOverlay.IsHitTestVisible = true;
+            if (!_mapVisible)
+            {
+                ToggleMap();                  // apri la mappa: è ciò con cui si interagisce
+            }
+        }
+        else
+        {
+            _mapOverlay.IsHitTestVisible = false;
+            EnableMouseLook();                // rinascondi il cursore e riprendi il mouse-look
+        }
+    }
+
+    /// <summary>Centro del viewport in pixel fisici (PointToScreen tiene conto del DPI).</summary>
+    private Point CenterScreenPoint() =>
+        _viewport.PointToScreen(new Point(_viewport.ActualWidth / 2, _viewport.ActualHeight / 2));
+
+    private void WarpToCenter()
+    {
+        if (_viewport.ActualWidth <= 0)
+        {
+            return;
+        }
+
+        var c = CenterScreenPoint();
+        SetCursorPos((int)Math.Round(c.X), (int)Math.Round(c.Y));
+    }
+
+    private void OnMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        // Fuori dall'esplorazione (intro, zoom d'uscita) o se la finestra non è
+        // attiva non si ruota: altrimenti ri-centrare il cursore darebbe
+        // fastidio mentre si è altrove (Alt+Tab).
+        if (!_mouseLook || !_introDone || _exiting || !IsActive)
+        {
+            return;
+        }
+
+        var c = CenterScreenPoint();
+        if (!GetCursorPos(out var p))
+        {
+            return;
+        }
+
+        var dx = p.X - c.X;
+        var dy = p.Y - c.Y;
+        if (dx == 0 && dy == 0)
+        {
+            return; // è il movimento causato dal nostro stesso ri-centraggio
+        }
+
+        _yaw += dx * MouseSensitivity;
+        _pitch = Math.Clamp(_pitch - dy * MouseSensitivity, -PitchLimit, PitchLimit);
+
+        // ri-porta il cursore al centro: lo spostamento diventa "relativo",
+        // così si può girare all'infinito senza uscire dallo schermo
+        SetCursorPos((int)Math.Round(c.X), (int)Math.Round(c.Y));
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out NativePoint point);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
 
     private void Tick()
     {
@@ -505,21 +817,45 @@ public sealed class Shop3DWindow : Window
         var fwd = new Vector3D(Math.Sin(_yaw), 0, -Math.Cos(_yaw));
         var right = new Vector3D(Math.Cos(_yaw), 0, Math.Sin(_yaw));
 
+        // E tenuto premuto: corri (passo più lungo per i corridoi lunghi)
+        var move = _keys.Contains(Key.E) ? MoveSpeed * SprintFactor : MoveSpeed;
+
         if (_keys.Contains(Key.Left)) _yaw -= TurnSpeed;
         if (_keys.Contains(Key.Right)) _yaw += TurnSpeed;
-        if (_keys.Contains(Key.Up) || _keys.Contains(Key.W)) { _px += fwd.X * MoveSpeed; _pz += fwd.Z * MoveSpeed; }
-        if (_keys.Contains(Key.Down) || _keys.Contains(Key.S)) { _px -= fwd.X * MoveSpeed; _pz -= fwd.Z * MoveSpeed; }
-        if (_keys.Contains(Key.A)) { _px -= right.X * MoveSpeed; _pz -= right.Z * MoveSpeed; }
-        if (_keys.Contains(Key.D)) { _px += right.X * MoveSpeed; _pz += right.Z * MoveSpeed; }
+        if (_keys.Contains(Key.Up) || _keys.Contains(Key.W)) { _px += fwd.X * move; _pz += fwd.Z * move; }
+        if (_keys.Contains(Key.Down) || _keys.Contains(Key.S)) { _px -= fwd.X * move; _pz -= fwd.Z * move; }
+        if (_keys.Contains(Key.A)) { _px -= right.X * move; _pz -= right.Z * move; }
+        if (_keys.Contains(Key.D)) { _px += right.X * move; _pz += right.Z * move; }
 
         // resta dentro la stanza
         _px = Math.Clamp(_px, -_roomHalfW + 1, _roomHalfW - 1);
         _pz = Math.Clamp(_pz, _roomBackZ + 1.2, 11);
 
-        // Da fermi non cambia nulla: banchi, messa a fuoco e porte dipendono
-        // solo dalla posizione. Saltare il giro evita di sporcare l'albero di
-        // rendering 60 volte al secondo per niente.
-        if (_settled && _px == _lastPx && _pz == _lastPz && _yaw == _lastYaw)
+        // head-bob: la fase avanza con la distanza percorsa (2 "passi" per ciclo,
+        // da cui il seno a frequenza doppia sull'asse verticale), il livello sale
+        // camminando e scende da fermo per un avvio/arresto morbido.
+        var walking = _keys.Contains(Key.Up) || _keys.Contains(Key.W) ||
+                      _keys.Contains(Key.Down) || _keys.Contains(Key.S) ||
+                      _keys.Contains(Key.A) || _keys.Contains(Key.D);
+        _bobLevel += ((walking ? 1.0 : 0.0) - _bobLevel) * 0.15;
+        if (_bobLevel < 0.001)
+        {
+            _bobLevel = 0;
+        }
+
+        if (walking)
+        {
+            _bobPhase += move * BobCyclesPerMeter;
+        }
+
+        var bobY = Math.Sin(_bobPhase * 2) * BobAmpY * _bobLevel;
+        var bobX = Math.Cos(_bobPhase) * BobAmpX * _bobLevel;
+
+        // Da fermi (e senza bob residuo) non cambia nulla: banchi, messa a fuoco
+        // e porte dipendono solo da posizione e orientamento. Saltare il giro
+        // evita di sporcare l'albero di rendering 30 volte al secondo per niente.
+        if (_settled && _px == _lastPx && _pz == _lastPz && _yaw == _lastYaw && _pitch == _lastPitch
+            && bobY == _lastBobY && bobX == _lastBobX)
         {
             return;
         }
@@ -527,10 +863,16 @@ public sealed class Shop3DWindow : Window
         _lastPx = _px;
         _lastPz = _pz;
         _lastYaw = _yaw;
+        _lastPitch = _pitch;
+        _lastBobY = bobY;
+        _lastBobX = bobX;
         _settled = true;
 
-        _camera.Position = new Point3D(_px, 1.65, _pz);
-        _camera.LookDirection = new Vector3D(fwd.X, -0.08, fwd.Z);
+        // Il moto resta sul piano (fwd/right sono orizzontali: non si "vola"),
+        // ma lo sguardo segue anche il pitch e la testa ondeggia col passo.
+        var cosP = Math.Cos(_pitch);
+        _camera.Position = new Point3D(_px + right.X * bobX, 1.65 + bobY, _pz + right.Z * bobX);
+        _camera.LookDirection = new Vector3D(fwd.X * cosP, Math.Sin(_pitch), fwd.Z * cosP);
 
         UpdateBoothScale();
         UpdateFocus();
@@ -622,6 +964,7 @@ public sealed class Shop3DWindow : Window
         }
         _exiting = true;
         _keys.Clear();
+        DisableMouseLook(); // basta ri-centrare il cursore: parte lo zoom
 
         if (_desktopShot is null)
         {
@@ -785,6 +1128,11 @@ public sealed class Shop3DWindow : Window
         _focus = -1;
         _focusLabel.Text = "";
         _settled = false; // stanza nuova: il prossimo giro deve applicare tutto
+
+        if (_mapVisible)
+        {
+            BuildPathMap(); // aggiorna la scia se la mappa è aperta
+        }
     }
 
     private static IEnumerable<Entry> ReadEntries(string? path)

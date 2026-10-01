@@ -36,10 +36,21 @@ Resta residente in memoria con un'icona nell'area di notifica.
   Frecce/rotella per scorrere, Invio per aprire, Esc per chiudere.
 
 **Vista 3D Game** 🎮
-- Esplorazione in prima persona di dischi e cartelle come dentro un negozio, con
-  un ingresso cinematografico (caricamento → il tesseratto colorato si apre come una
-  porta a 4 parti → vista dall'alto → atterraggio). Movimento frecce/WASD, Invio o clic per
-  entrare/aprire, Backspace per risalire.
+- Esplorazione in prima persona di dischi e cartelle come dentro un negozio, con un
+  ingresso cinematografico: caricamento con un **tesseratto (ipercubo) tridimensionale**
+  che ruota mostrando la sua profondità (vista di tre quarti), poi si "vola dentro" fino
+  ad atterrare nella stanza.
+- **Muoversi**: `W A S D` oppure le **frecce**; tieni premuto **E** per correre nei
+  corridoi lunghi. La camera emula il **passo umano** (head-bob) mentre cammini.
+- **Guardarsi intorno**: il **mouse** ruota la vista a 360° in tutte le direzioni
+  (orizzontale e verticale); le frecce restano d'aiuto. Un mirino al centro indica dove
+  punta il clic.
+- **Interagire**: **Invio** o **clic** per entrare in una cartella / aprire un file,
+  **Backspace** per risalire.
+- **Mappa del percorso**: **Q** apre/chiude una mappa in stile 3D con la scia di cartelle
+  dalla radice fino a dove ti trovi.
+- **Cursore per l'overlay**: **Tab** alterna mouse-look e puntatore; in modalità cursore
+  la mappa diventa **cliccabile** per saltare a una cartella del percorso.
 - **Uscita**: in fondo a ogni stanza c'è una **porta-tesseratto** che si apre man mano
   che ti avvicini, scoprendo il desktop oltre il varco; attraversandola parte uno zoom
   che ti riporta al desktop. In alternativa, `Esc`.
