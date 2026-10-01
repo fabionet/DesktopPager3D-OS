@@ -79,6 +79,19 @@ public sealed class TrayApplicationContext : ApplicationContext
         effectsMenu.DropDownItems.Add(cubeItem);
         effectsMenu.DropDownItems.Add(wobbleItem);
         trayMenu.Items.Add(effectsMenu);
+
+        // Modalità VR della Vista 3D Game: DI DEFAULT SPENTA. Da accesa, aprire
+        // la Vista 3D Game lancia il modulo VR (visore) invece della finestra 3D.
+        var vrItem = new ToolStripMenuItem("Vista 3D Game in VR (visore)")
+        {
+            Checked = VrMode.Enabled, // false all'avvio
+            CheckOnClick = true,
+            ToolTipText = "Richiede un visore OpenXR (es. Meta Quest via Link). " +
+                          "Da spenta, la Vista 3D Game resta su schermo."
+        };
+        vrItem.Click += (_, _) => VrMode.Enabled = vrItem.Checked;
+        trayMenu.Items.Add(vrItem);
+
         trayMenu.Items.Add(BuildTaskbarMenu());
         trayMenu.Items.Add(BuildColorMenu());
         var autostartItem = new ToolStripMenuItem("Avvio automatico con Windows")

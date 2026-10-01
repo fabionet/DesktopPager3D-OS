@@ -1287,6 +1287,13 @@ public sealed class BarForm : Form
 
     private void OpenShop3D()
     {
+        // Modalità VR (accesa dal menu, di default spenta): lancia il modulo VR
+        // separato. Se non è disponibile, si ripiega sulla vista 3D su schermo.
+        if (VrMode.Enabled && TryOpenVr())
+        {
+            return;
+        }
+
         try
         {
             new Shop3DWindow().Show();
@@ -1298,6 +1305,60 @@ public sealed class BarForm : Form
                 "DesktopPager3D-OS",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>
+    /// Prova ad aprire la Vista 3D Game nel modulo VR. Restituisce true se ha
+    /// gestito la richiesta (avviato il VR o annullato di proposito), false per
+    /// far ripiegare il chiamante sulla vista 3D su schermo.
+    /// </summary>
+    private bool TryOpenVr()
+    {
+        var exe = VrMode.FindExecutable();
+        if (exe is null)
+        {
+            MessageBox.Show(
+                "Il modulo VR non è installato accanto all'app.\n" +
+                "La Vista 3D Game verrà aperta su schermo.",
+                "DesktopPager3D-OS — VR",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return false; // ripiega sulla vista normale
+        }
+
+        if (!VrMode.OpenXrAvailable())
+        {
+            var answer = MessageBox.Show(
+                "Nessun visore/runtime OpenXR rilevato (es. Meta Quest via Link non attivo).\n\n" +
+                "Aprire comunque il modulo VR nel simulatore a schermo?",
+                "DesktopPager3D-OS — VR",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (answer != DialogResult.Yes)
+            {
+                return true; // l'utente ha annullato: non aprire nulla
+            }
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = exe,
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(exe)
+            });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                "Impossibile avviare il modulo VR:\n" + ex.Message,
+                "DesktopPager3D-OS — VR",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return false; // ripiega sulla vista normale
         }
     }
 

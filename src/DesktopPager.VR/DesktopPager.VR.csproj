@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AssemblyName>DesktopPager3D-VR</AssemblyName>
+    <Product>DesktopPager3D-OS (VR)</Product>
+    <AssemblyTitle>DesktopPager3D-OS VR</AssemblyTitle>
+    <Company>FabioNET</Company>
+    <Description>Modulo VR opzionale (StereoKit/OpenXR) di DesktopPager3D-OS: esplora dischi e cartelle in realtà virtuale.</Description>
+    <Copyright>© 2026 FabioNET</Copyright>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StereoKit" Version="0.3.11" />
+  </ItemGroup>
+</Project>

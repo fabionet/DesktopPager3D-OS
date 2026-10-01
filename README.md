@@ -44,6 +44,19 @@ Resta residente in memoria con un'icona nell'area di notifica.
   che ti avvicini, scoprendo il desktop oltre il varco; attraversandola parte uno zoom
   che ti riporta al desktop. In alternativa, `Esc`.
 
+**Modalità VR (visore)** 🥽 (opzionale, di default spenta)
+- Menu della tray → **"Vista 3D Game in VR (visore)"**. Da accesa, aprire la Vista 3D
+  Game lancia il **modulo VR separato** (`DesktopPager3D-VR`, basato su
+  [StereoKit](https://stereokit.net/)/OpenXR), che ricostruisce la stanza in realtà
+  virtuale: testa tracciata dal visore, spostamento con lo stick, selezione col raggio
+  del controller.
+- Richiede un **runtime OpenXR + visore** (es. **Meta Quest via Link/Air Link**, SteamVR,
+  Windows Mixed Reality). Se manca il modulo o il visore, l'app **avvisa e ripiega** sulla
+  vista 3D su schermo. Sulle GPU non adatte al VR (es. Intel HD 3000) resta semplicemente
+  spenta: **nessun impatto** sull'uso normale.
+- È un eseguibile a sé, **fuori dall'installer MSI**: chi non usa il VR non lo scarica
+  nemmeno. Dettagli e comandi in [`src/DesktopPager.VR/README.md`](src/DesktopPager.VR/README.md).
+
 **Effetti desktop 3D** (opzionali, di default spenti)
 - 🧊 **Cubo del desktop**: tieni **Ctrl + tasto destro** e trascina sul desktop per
   far ruotare le pagine delle icone come le facce di un cubo 3D; al rilascio scatta
@@ -127,6 +140,16 @@ dotnet run  --project src/DesktopPager.Tray/DesktopPager.Tray.csproj -c Release
 dotnet test tests/DesktopPager.Tray.Tests/DesktopPager.Tray.Tests.csproj -c Release
 ```
 
+### Modulo VR opzionale (StereoKit/OpenXR)
+Eseguibile separato, non incluso nell'MSI. Il pacchetto NuGet **StereoKit** porta con
+sé le librerie native OpenXR.
+```
+dotnet build src/DesktopPager.VR/DesktopPager.VR.csproj -c Release
+dotnet run  --project src/DesktopPager.VR/DesktopPager.VR.csproj -c Release
+```
+Senza un runtime OpenXR, StereoKit apre il **Simulatore** a schermo (mouse + WASD).
+Per lanciarlo dall'app, accendi **"Vista 3D Game in VR (visore)"** nel menu della tray.
+
 ### Generare l'installer MSI
 Lo script `scripts/build-and-package.ps1` esegue l'intero percorso (pubblicazione
 self-contained + build dell'MSI) con percorsi relativi al repository. Versione e
@@ -181,6 +204,7 @@ oppure con CMake (generatore Visual Studio o MinGW). Hotkey identiche all'app .N
 ## Struttura del progetto
 ```
 src/DesktopPager.Tray/        app principale C# (WinForms + WPF)
+src/DesktopPager.VR/          modulo VR opzionale (StereoKit/OpenXR) — eseguibile a sé
 src/DesktopPager.NativeCpp/   versione nativa C++ Win32 (pager leggero)
 tests/DesktopPager.Tray.Tests/ test xUnit
 installer/                    sorgenti WiX dell'MSI + licenza
